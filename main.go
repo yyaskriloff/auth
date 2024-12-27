@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,7 +23,7 @@ type AuthorizationCodeFlow struct {
 
 var session *cache.Cache
 
-var usedCodes = make([]string, 0)
+// var usedCodes = make([]string, 0)
 
 const callbackURL = "http://localhost:3000/callback"
 
@@ -50,6 +52,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Bad redirect URI"))
 		return
 	}
+
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -74,19 +77,90 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	session.Set(secret, authInfo, cache.DefaultExpiration)
 
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Let's authenticate"))
+	redirect, err := url.Parse("/login")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Internal server error"))
+		return
+	}
+	q := redirect.Query()
+	q.Set("sid", secret)
+
+	redirect.RawQuery = q.Encode()
+	http.Redirect(w, r, redirect.String(), http.StatusFound)
+
+}
+
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		file, err := os.Open("./views/index.html")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("Internal server error"))
+			return
+		}
+		defer file.Close()
+
+		fi, err := file.Stat()
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("Internal server error"))
+			return
+		}
+
+		http.ServeContent(w, r, file.Name(), fi.ModTime(), file)
+		return
+	}
+
+	u, err := url.Parse(r.URL.String())
+	if err != nil {
+		panic(err)
+	}
+
+	queryParams := u.Query()
+	sid := queryParams.Get("sid")
+
+	fmt.Println("sid", sid)
+
+	authInfo, found := session.Get(sid)
+	if !found {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("invalid request"))
+		return
+	}
+
+	verified, ok := authInfo.(AuthorizationCodeFlow)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Internal server error"))
+		return
+	}
+
+	fmt.Println("verified", verified)
+
+	urlWithAccessToken, err := url.Parse(verified.RedirectURI)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Internal server error"))
+		return
+	}
+
+	q := urlWithAccessToken.Query()
+	q.Set("code", "123456")
+
+	urlWithAccessToken.RawQuery = q.Encode()
+
+	http.Redirect(w, r, urlWithAccessToken.String(), http.StatusFound)
 
 }
 
 func main() {
 
-	usedCodes = append(usedCodes, "hello-world")
 	session = cache.New(5*time.Minute, cache.NoExpiration)
-	usedCodes = append(usedCodes, "hello-world")
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/auth", handleAuth)
+	mux.HandleFunc("/login", handleLogin)
 
 	http.ListenAndServe(":8080", mux)
 
